@@ -1,0 +1,10 @@
+build/
+tools/
+signing/
+*.p12
+*.jks
+*.keystore
+*.apk
+*.idsig
+src/R.java
+.DS_Store
