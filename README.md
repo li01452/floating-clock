@@ -26,3 +26,16 @@ bash build.sh
 ## 验证情况
 
 1.0 已由用户在安卓设备上确认可用。1.1 已通过编译、APK 结构、签名及新旧签名一致性检查，尚未完成设备运行验证。
+
+## 自动编译与发布
+
+推送到 `main` 或在 Actions 中手动运行 `Build and release APK` 后自动编译。
+
+在仓库 Settings → Secrets and variables → Actions 中添加两个 Repository secrets：
+
+- `SIGNING_KEYSTORE_BASE64`：原签名证书 `.p12` 文件的 Base64 文本。
+- `SIGNING_STORE_PASSWORD`：原证书的容器密码。
+
+配置完成后，每次运行会使用原证书签名并在 Releases 发布可直接下载的 APK，可覆盖安装原应用。流程会核对原证书指纹并检查 APK 小于 1 MB。签名材料不进入源码仓库。
+
+未配置 Secrets 时仅编译开发测试包，放在 Actions 的 Artifacts 中，不发布 Release；测试包签名每次可能不同，不能覆盖安装原版。添加 Secrets 后，在 Actions 页面重新运行流程即可。
