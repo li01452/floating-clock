@@ -1,0 +1,102 @@
+name: Build and release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Restore signing certificate
+        id: signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$KEYSTORE_BASE64" && -n "$KEYSTORE_PASSWORD" ]]; then
+            umask 077
+            mkdir -p "$RUNNER_TEMP/clock-signing"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/clock-signing/clock.p12"
+            echo "SIGNING_KEYSTORE=$RUNNER_TEMP/clock-signing/clock.p12" >> "$GITHUB_ENV"
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          elif [[ -n "$KEYSTORE_BASE64" || -n "$KEYSTORE_PASSWORD" ]]; then
+            echo '::error::Both SIGNING_KEYSTORE_BASE64 and SIGNING_STORE_PASSWORD must be set.'
+            exit 1
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Signing secrets are not configured. Building a development APK only; Release publishing is skipped.'
+          fi
+      - name: Build APK
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: clock
+        run: bash build.sh
+      - name: Verify size and original signing identity
+        shell: bash
+        env:
+          SIGNED_RELEASE: ${{ steps.signing.outputs.enabled }}
+        run: |
+          set -euo pipefail
+          test "$(stat -c '%s' build/MillisecondClock.apk)" -lt 1000000
+          if [[ "$SIGNED_RELEASE" == true ]]; then
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs build/MillisecondClock.apk > "$RUNNER_TEMP/clock-certificate.txt"
+            grep -Fq 'certificate SHA-256 digest: 5409fab5879e489120787a1e24d9c447e2ccdf042af16093ac58fd295a6dbc34' "$RUNNER_TEMP/clock-certificate.txt"
+          fi
+      - name: Retain build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: floating-clock-${{ steps.signing.outputs.enabled == 'true' && 'release' || 'development' }}
+          path: build/MillisecondClock.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish APK to Releases
+        if: steps.signing.outputs.enabled == 'true' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          release_tag="build-$GITHUB_RUN_NUMBER"
+          release_title="Floating Clock · build $GITHUB_RUN_NUMBER"
+          printf 'Source commit: %s\n\nAndroid 7.0+. Signed with the original application certificate.\n' "$GITHUB_SHA" > "$RUNNER_TEMP/clock-release-notes.txt"
+          if ! gh release view "$release_tag" > /dev/null 2>&1; then
+            gh release create "$release_tag" --target "$GITHUB_SHA" --title "$release_title" --notes-file "$RUNNER_TEMP/clock-release-notes.txt" --latest
+          fi
+          gh release upload "$release_tag" build/MillisecondClock.apk --clobber
+      - name: Build summary
+        shell: bash
+        env:
+          SIGNED_RELEASE: ${{ steps.signing.outputs.enabled }}
+        run: |
+          if [[ "$SIGNED_RELEASE" == true ]]; then
+            echo '### APK built and signed with the original certificate.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '### Development APK only — no Release was published.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Add SIGNING_KEYSTORE_BASE64 and SIGNING_STORE_PASSWORD in repository Actions secrets, then run this workflow again.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Development builds use a new certificate on each clean runner and cannot upgrade the original installed APK.' >> "$GITHUB_STEP_SUMMARY"
+          fi
